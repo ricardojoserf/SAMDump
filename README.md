@@ -2,11 +2,14 @@
 
 Extracts Windows SAM and SYSTEM files using Volume Shadow Copy Service (VSS) with multiple exfiltration options and XOR obfuscation:
 
-- Lists volume shadow copies using VSS and creates one if necessary
-- Extracts SAM and SYSTEM files from shadow copies
-- Uses direct NT API calls for file operations
+- Lists Volume Shadow Copies using VSS and creates one if necessary
+- Extracts SAM and SYSTEM files from the Shadow Copy
+- Uses NT API calls for file operations (*NtCreateFile*, *NtReadFile*, *NtWriteFile*,...)
 - Supports XOR encoding for obfuscation
-- Multiple exfiltration methods: local save or network transfer
+- Exfiltration methods: Local save or Network transfer
+
+
+It requires to run as Administrator, and if created the Shadow Copy is automatically deleted after ~5 minutes. 
 
 
 <br>
@@ -75,12 +78,14 @@ python server.py --host 192.168.1.72 --port 1234 --xor-key "SAMDump2025"
 
 ![img4](https://raw.githubusercontent.com/ricardojoserf/ricardojoserf.github.io/master/images/samdump/Screenshot_4.png)
 
+The filename contains the IP address and the date, so you can send the files from different systems, automating the process.
+
 
 <br>
 
 ## Script to decode the files
 
-*xor-decoder.py* is a Python script to decode XOR-encoded SAM and SYSTEM files:
+*xor-decoder.py* is a Python script to decode XOR-encoded SAM and SYSTEM files locally:
 
 ```
 python xor-decoder.py [OPTIONS]
@@ -113,12 +118,11 @@ python xor-decoder.py --sam sam.txt --system system.txt --xor-key "MyKey" --outp
 
 ## Motivation
 
-I wanted to automate this process and most Windows I find run VSS, but security solutions detect the use of *vssadmin* to create Shadow Copies and extract these files because it is an old, well-known technique.
+I wanted to automate this process and most Windows I find run VSS, but security solutions detect the use of *vssadmin* to create Shadow Copies and extract these files because it is a well-known technique.
 
-This tool extracts the files without writing to the target filesystem when using remote transfer mode and XOR-encoding offers basic obfuscation to evade signature-based detection (even when using remote mode).
+This tool extracts the files without writing to the target filesystem when using remote transfer mode; and XOR-encoding offers basic obfuscation to evade signature-based detection (even when using remote mode).
 
 Plus, it leverages NT API calls to bypass some monitoring and user-mode API hooks.
-
 
 <br>
 
