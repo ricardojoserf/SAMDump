@@ -124,6 +124,7 @@ This tool extracts the files without writing to the target filesystem when using
 
 Plus, it leverages NT API calls to bypass some monitoring and user-mode API hooks.
 
+
 <br>
 
 ## NT API Integration
@@ -135,3 +136,4 @@ The tool employs NT system calls instead of standard Windows API functions, whic
 - *NtWriteFile*: Used to save the files locally
 
 - It uses a custom *GetProcAddress* implementation to resolve function addresses using only *NtReadVirtualMemory*
+
