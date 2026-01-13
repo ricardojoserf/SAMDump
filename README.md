@@ -9,8 +9,9 @@ Extracts Windows SAM and SYSTEM files using Volume Shadow Copy Service (VSS) wit
 - Exfiltration methods: Local save or Network transfer
 
 
-It requires to run as Administrator, and if created the Shadow Copy is automatically deleted after ~5 minutes. 
+It is implemented in C++, C#, and Python, and it works on modern Windows versions. 
 
+It requires elevated privileges, and if created the Shadow Copy is automatically deleted after ~5 minutes.
 
 <br>
 
@@ -116,6 +117,17 @@ python xor-decoder.py --sam sam.txt --system system.txt --xor-key "MyKey" --outp
 
 <br>
 
+## Implementations
+
+The project includes versions implemented in three languages:
+
+- **C++**: Initial implementation
+- **C#**: .NET version for better portability  
+- **Python**: It requires the `comtypes` library to be installed (`pip install comtypes`)
+
+
+<br>
+
 ## Motivation
 
 I wanted to automate this process and most Windows I find run VSS, but security solutions detect the use of *vssadmin* to create Shadow Copies and extract these files because it is a well-known technique.
@@ -134,6 +146,7 @@ The tool employs NT system calls instead of standard Windows API functions, whic
 - `NtCreateFile` and `NtReadFile`: Used to open a handle and read the bytes of the SAM and SYSTEM files in the Shadow Copy
 
 - `NtWriteFile`: Used to save the files locally
+
 
 <br>
 
