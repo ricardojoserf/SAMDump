@@ -9,9 +9,9 @@ Extracts Windows SAM and SYSTEM files using Volume Shadow Copy Service (VSS) wit
 - Exfiltration methods: Local save or Network transfer
 
 
-It is implemented in C++, C#, Crystal, Deno and Python, and it works on modern Windows versions. 
-
 It requires elevated privileges, and if created the Shadow Copy is automatically deleted after ~5 minutes.
+
+It is implemented in C++, C#, Crystal, Deno and Python, and it works on modern Windows versions.
 
 <br>
 
@@ -117,18 +117,6 @@ python xor-decoder.py --sam sam.txt --system system.txt --xor-key "MyKey" --outp
 
 <br>
 
-## Implementations
-
-The project includes versions implemented in three languages:
-
-- **C++**: Initial implementation
-- **C#**: .NET version for better portability  
-- **Deno**: Zero-dependency JavaScript, can run directly from a URL without cloning
-- **Python**: It requires the `comtypes` library to be installed (`pip install comtypes`)
-
-
-<br>
-
 ## Motivation
 
 I wanted to automate this process and most Windows I find run VSS, but security solutions detect the use of *vssadmin* to create Shadow Copies and extract these files because it is a well-known technique.
@@ -147,6 +135,58 @@ The tool employs NT system calls instead of standard Windows API functions, whic
 - `NtCreateFile` and `NtReadFile`: Used to open a handle and read the bytes of the SAM and SYSTEM files in the Shadow Copy
 
 - `NtWriteFile`: Used to save the files locally
+
+
+<br>
+
+## Compilation (for Windows)
+
+### C++
+
+Open `SAMDump.sln` in Visual Studio and build.
+
+### C#
+
+Compile using Visual Studio or `msbuild`.
+
+### Crystal
+
+```
+cd Crystal
+crystal build samdump.cs --release
+```
+
+### Deno
+
+```
+cd Deno
+deno run --allow-ffi --allow-net --allow-write samdump.js --save-local
+```
+
+Or run it directly from the repo without cloning:
+
+```
+deno run --allow-ffi --allow-net --allow-write https://raw.githubusercontent.com/ricardojoserf/SAMDump/main/Deno/samdump.js --save-local
+```
+
+### Python
+
+You can use the Python script:
+
+```
+cd Python
+pip install comtypes
+python SAMDump.py --save-local
+```
+
+Or create a stand-alone binary with:
+
+```
+cd Python
+pip install pyinstaller
+pyinstaller -F SAMDump.py
+.\dist\SAMDump.exe --save-local
+```
 
 
 <br>
