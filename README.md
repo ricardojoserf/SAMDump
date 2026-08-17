@@ -9,7 +9,7 @@ Extracts Windows SAM and SYSTEM files using Volume Shadow Copy Service (VSS) wit
 - Exfiltration methods: Local save or Network transfer
 
 
-It is implemented in C++, C#, Crystal and Python, and it works on modern Windows versions. 
+It is implemented in C++, C#, Crystal, Deno and Python, and it works on modern Windows versions. 
 
 It requires elevated privileges, and if created the Shadow Copy is automatically deleted after ~5 minutes.
 
@@ -123,6 +123,7 @@ The project includes versions implemented in three languages:
 
 - **C++**: Initial implementation
 - **C#**: .NET version for better portability  
+- **Deno**: Zero-dependency JavaScript, can run directly from a URL without cloning
 - **Python**: It requires the `comtypes` library to be installed (`pip install comtypes`)
 
 
