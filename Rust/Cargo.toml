@@ -1,0 +1,13 @@
+[package]
+name = "samdump"
+version = "0.1.0"
+edition = "2026"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

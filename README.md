@@ -11,7 +11,7 @@ Extracts Windows SAM and SYSTEM files using Volume Shadow Copy Service (VSS) wit
 
 It requires elevated privileges, and if created the Shadow Copy is automatically deleted after ~5 minutes.
 
-It is implemented in C++, C#, Crystal, Deno and Python, and it works on modern Windows versions.
+It is implemented in C++, C#, Crystal, Deno, Python, Rust, Golang and Nim, and it works on modern Windows versions.
 
 <br>
 
@@ -167,6 +167,30 @@ Or run it directly from the repo without cloning:
 
 ```
 deno run --allow-ffi --allow-net --allow-write https://raw.githubusercontent.com/ricardojoserf/SAMDump/main/Deno/samdump.js --save-local
+```
+
+### Rust
+
+```
+cd Rust
+cargo build --release
+.\target\release\samdump.exe --save-local
+```
+
+### Golang
+
+```
+cd Golang
+go build -o samdump.exe -ldflags="-s -w" samdump.go
+.\samdump.exe --save-local
+```
+
+### Nim
+
+```
+cd Nim
+nim c -d:release samdump.nim
+.\samdump.exe --save-local
 ```
 
 ### Python
